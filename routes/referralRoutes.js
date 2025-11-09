@@ -181,14 +181,14 @@ router.post("/upgrade-plan", async (req, res) => {
             2
           )}.`,
         ]
-      );
+      ); 
 
       await client.query(
         "INSERT INTO commission_history (user_id, from_user_id, type, amount, level) VALUES ($1,$2,'direct',$3,1)",
         [direct.id, userId, directBonus.toFixed(2)]
       );
     }
-
+ 
     // 🟣 Multi-Level Income
     for (const upline of uplines) {
       const rate = COMMISSION_RATES[upline.level - 1];

@@ -13,20 +13,34 @@ exports.sendOtp = async (req, res) => {
   const cleanEmail = email.trim().toLowerCase();
   const phone = userData.phone_number;
   const otpExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes expiry
-  const referralCode = userData.referral_code; // ADD THIS LINE
+//   const referralCode = userData.referral_code; // ADD THIS LINE
 
-  // ✅ Check referral code validity only (no increment yet)
-if (referralCode) {
-  const refUser = await pool.query(
-    `SELECT id FROM sign_up WHERE reference_code = $1`,
-    [referralCode]
-  );
-  if (refUser.rows.length === 0) {
-    console.log(`🔴 Invalid referral code entered: ${referralCode}`);
-    return res.status(400).json({ message: "Invalid referral code" });
+//   // ✅ Check referral code validity only (no increment yet)
+// if (referralCode) {
+//   const refUser = await pool.query(
+//     `SELECT id FROM sign_up WHERE reference_code = $1`,
+//     [referralCode]
+//   );
+//   if (refUser.rows.length === 0) {
+//     console.log(`🔴 Invalid referral code entered: ${referralCode}`);
+//     return res.status(400).json({ message: "Invalid referral code" });
+//   }
+// }
+
+  // ✅ Handle optional referral (safe null)
+  const referralCode = userData.referral_code?.trim() || null;
+
+  // ✅ Only check referral validity if provided
+  if (referralCode) {
+    const refUser = await pool.query(
+      `SELECT id FROM sign_up WHERE reference_code = $1`,
+      [referralCode]
+    );
+    if (refUser.rows.length === 0) {
+      console.log(`🔴 Invalid referral code entered: ${referralCode}`);
+      return res.status(400).json({ message: "Invalid referral code" });
+    }
   }
-}
-
 
 
   try {
