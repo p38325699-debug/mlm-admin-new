@@ -102,7 +102,7 @@ exports.forgotPassword = async (req, res) => {
 
     if (!email || email.trim() === "") {
       return res.status(400).json({ success: false, message: "Email is required" });
-    } 
+    }
 
     const cleanEmail = email.trim().toLowerCase();
 
