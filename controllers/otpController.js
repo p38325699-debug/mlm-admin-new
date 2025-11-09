@@ -130,32 +130,32 @@ if (referralCode) {
 // VERIFY OTP
 // ---------------------------------------------
 exports.verifyOtp = async (req, res) => {
-  try {
-    const { email, otp } = req.body;
-    const cleanEmail = email.trim().toLowerCase();
+  const { email, otp } = req.body;
+  const cleanEmail = email.trim().toLowerCase();
 
-    // 1️⃣ Check user exists with OTP
-    const userResult = await pool.query(
+  try {
+    const result = await pool.query(
       `SELECT * FROM sign_up WHERE LOWER(email) = $1`,
       [cleanEmail]
     );
 
-    if (userResult.rows.length === 0) {
+    if (result.rows.length === 0) {
       return res.status(400).json({ success: false, message: "Email not found" });
     }
 
-    const user = userResult.rows[0];
+    const user = result.rows[0];
 
-    // 2️⃣ Validate OTP
+    // Check if OTP matches
     if (user.otp !== otp) {
       return res.status(400).json({ success: false, message: "Invalid OTP" });
     }
 
+    // Check expiry
     if (user.otp_expiry && new Date() > new Date(user.otp_expiry)) {
       return res.status(400).json({ success: false, message: "OTP expired" });
     }
 
-    // 3️⃣ Mark verified
+    // ✅ Mark verified and save timestamp
     await pool.query(
       `UPDATE sign_up 
        SET verified = true, otp = NULL, otp_expiry = NULL, verified_at = NOW()
@@ -163,42 +163,39 @@ exports.verifyOtp = async (req, res) => {
       [cleanEmail]
     );
 
-    // 4️⃣ Fetch referral (if any)
-    const underRef = user.under_ref && user.under_ref !== "null" && user.under_ref !== "undefined"
-      ? user.under_ref.trim()
-      : null;
+    // ✅ After verification, increment reference_count for referrer (if any)
+const refCheck = await pool.query(
+  `SELECT under_ref FROM sign_up WHERE LOWER(email) = $1`,
+  [cleanEmail]
+); 
 
-    // 5️⃣ If referral exists, increment referrer's count
-    if (underRef) {
-      const refCheck = await pool.query(
-        `SELECT id FROM sign_up WHERE reference_code = $1`,
-        [underRef]
-      );
+if (refCheck.rows[0]?.under_ref) {
+  const refCode = refCheck.rows[0].under_ref;
+  await pool.query(
+    `UPDATE sign_up SET reference_count = reference_count + 1 WHERE reference_code = $1`,
+    [refCode]
+  );
+  console.log(`🟢 Referral count incremented for referrer: ${refCode}`);
+}
 
-      if (refCheck.rows.length > 0) {
-        await pool.query(
-          `UPDATE sign_up SET reference_count = reference_count + 1 WHERE reference_code = $1`,
-          [underRef]
+
+    // ✅ Schedule unverify if MPIN not set in 1 hour
+    setTimeout(async () => {
+      try {
+        const checkUser = await pool.query(
+          `SELECT mpin, verified FROM sign_up WHERE LOWER(email) = $1`,
+          [cleanEmail]
         );
-        console.log(`🟢 Referral count incremented for referrer: ${underRef}`);
-      } else {
-        console.log(`⚠️ Invalid referral code (${underRef}), skipping increment`);
+
+        if (checkUser.rows[0] && !checkUser.rows[0].mpin && checkUser.rows[0].verified) {
+          await pool.query(`UPDATE sign_up SET verified = false WHERE LOWER(email) = $1`, [cleanEmail]);
+          console.log(`⏰ Auto-unverified ${cleanEmail} (no MPIN set in 1 hr)`);
+        }
+      } catch (e) {
+        console.error("Error auto-unverifying user:", e.message);
       }
-    } else {
-      console.log("ℹ️ No referral code — proceeding normally");
-    }
+    }, 60 * 60 * 1000); // 1 hour
 
-    // 6️⃣ Generate reference_code if missing
-    if (!user.reference_code) {
-      await pool.query(
-        `UPDATE sign_up 
-         SET reference_code = 'REF' || id
-         WHERE LOWER(email) = $1 AND reference_code IS NULL`,
-        [cleanEmail]
-      );
-    }
-
-    // 7️⃣ Return verified user
     const updatedUser = await pool.query(
       `SELECT id, full_name AS "fullName", email, reference_code AS "referenceCode", status
        FROM sign_up WHERE LOWER(email) = $1`,
@@ -210,10 +207,8 @@ exports.verifyOtp = async (req, res) => {
       message: "OTP verified and account activated",
       user: updatedUser.rows[0],
     });
-
   } catch (err) {
-    console.error("❌ Error verifying OTP:", err.message);
-    res.status(500).json({ success: false, message: "Server error during OTP verification" });
+    console.error("Error verifying OTP:", err);
+    res.status(500).json({ success: false, message: "Failed to verify OTP" });
   }
 };
-
