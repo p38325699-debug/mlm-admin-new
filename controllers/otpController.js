@@ -27,20 +27,27 @@ exports.sendOtp = async (req, res) => {
 //   }
 // }
 
-  // ✅ Handle optional referral (safe null)
-  const referralCode = userData.referral_code?.trim() || null;
+  // ✅ Clean referral code input safely
+let referralCode = userData?.referral_code;
+if (typeof referralCode === "string") {
+  referralCode = referralCode.trim();
+}
+if (!referralCode) {
+  referralCode = null; // ensure it's explicitly null, not undefined
+}
 
-  // ✅ Only check referral validity if provided
-  if (referralCode) {
-    const refUser = await pool.query(
-      `SELECT id FROM sign_up WHERE reference_code = $1`,
-      [referralCode]
-    );
-    if (refUser.rows.length === 0) {
-      console.log(`🔴 Invalid referral code entered: ${referralCode}`);
-      return res.status(400).json({ message: "Invalid referral code" });
-    }
+// ✅ Only validate if a non-empty referral code exists
+if (referralCode && referralCode !== "null" && referralCode !== "undefined") {
+  const refUser = await pool.query(
+    `SELECT id FROM sign_up WHERE reference_code = $1`,
+    [referralCode]
+  );
+  if (refUser.rows.length === 0) {
+    console.log(`🔴 Invalid referral code entered: ${referralCode}`);
+    return res.status(400).json({ message: "Invalid referral code" });
   }
+}
+
 
 
   try {
