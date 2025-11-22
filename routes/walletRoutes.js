@@ -7,10 +7,14 @@ const axios = require("axios");
 
 // Configure multer for memory storage (for bytea)
 const storage = multer.memoryStorage();
+const sharp = require('sharp');
+const Tesseract = require("tesseract.js");
+const { createHash } = require('crypto');
 const upload = multer({
   storage: storage,
   limits: {
-    fileSize: 5 * 1024 * 1024, // 5MB limit
+    fileSize: 5 * 1024 * 1024, // 5MB limit for files
+    fieldSize: 10 * 1024 * 1024, // 🆕 CRUCIAL: 10MB for text fields like ocr_raw
   },
   fileFilter: (req, file, cb) => { 
     if (file.mimetype.startsWith('image/')) {
@@ -18,6 +22,170 @@ const upload = multer({
     } else {
       cb(new Error('Only image files are allowed!'), false);
     }
+  }
+});
+
+// ✅ Extract text from image using OCR
+const extractTextFromImage = async (imageBuffer) => {
+  try {
+    console.log("🔍 Starting OCR text extraction...");
+    
+    const processedImage = await sharp(imageBuffer)
+      .resize(2000)
+      .grayscale()
+      .normalize()
+      .toBuffer();
+
+    const { data: { text } } = await Tesseract.recognize(
+      processedImage,
+      'eng',
+      { logger: m => console.log(m) }
+    );
+
+    console.log("📝 Extracted OCR Text:", text);
+    return text;
+  } catch (error) {
+    console.error("💥 OCR Extraction Error:", error);
+    throw new Error("Failed to extract text from image");
+  }
+};
+// /api/verify-upi
+router.post("/verify-upi", async (req, res) => {
+  try {
+    const { ocrText, utr_number, amount: userEnteredAmount } = req.body; // 🟩 FIXED: Renamed parameter
+
+    if (!ocrText) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "OCR text is required" 
+      });
+    }
+
+    console.log("📄 Received OCR Text:", ocrText);
+    console.log("🔢 Received UTR:", utr_number);
+    console.log("💰 Received Amount:", userEnteredAmount);
+
+    // ---------------------------------------
+    // 1. FIX OCR garbled numbers (O, ?, o → 0)
+    // ---------------------------------------
+    let cleanedText = ocrText.replace(/[OQo?]/gi, "0");
+    cleanedText = cleanedText.replace(/₹\s?/g, ""); // remove ₹ for easy scanning
+    cleanedText = cleanedText.replace(/\$/g, ""); // remove $ symbols
+
+    console.log("🧹 CLEANED OCR:", cleanedText);
+
+    // ---------------------------------------
+    // 2. Extract Amount (strong method)
+    // ---------------------------------------
+    let extractedAmount = null; // 🟩 FIXED: Different variable name
+
+    // Match amounts with various formats
+    const amountRegex = /\b(?:inr|rs|rs\.?|usd|\$)?\s?([\d,]+(?:\.\d{2})?)\b/i;
+    const amountMatch = cleanedText.match(amountRegex);
+
+    if (amountMatch) {
+      extractedAmount = parseFloat(amountMatch[1].replace(/,/g, ""));
+    }
+
+    console.log("📌 Extracted Amount:", extractedAmount);
+
+    // If still not found, use fallback
+    if (!extractedAmount) {
+      const fallback = cleanedText.match(/\b\d{3,6}\b/);
+      if (fallback) extractedAmount = parseInt(fallback[0]);
+      console.log("📌 Fallback Amount:", extractedAmount);
+    }
+
+    // ---------------------------------------
+    // 3. Extract UPI Transaction ID (10–18 digits)
+    // ---------------------------------------
+    let extractedUtr = null;
+    const upiRegex = /\b\d{10,18}\b/g;
+    const candidateIds = cleanedText.match(upiRegex) || [];
+
+    console.log("📌 UPI Candidates:", candidateIds);
+
+    // Priority 1: Match with provided UTR
+    if (utr_number && candidateIds.includes(utr_number)) {
+      extractedUtr = utr_number;
+    }
+    // Priority 2: Find number near "UPI" keyword
+    else if (cleanedText.includes("UPI")) {
+      const upiIndex = cleanedText.indexOf("UPI");
+      for (let id of candidateIds) {
+        if (cleanedText.indexOf(id) > upiIndex) {
+          extractedUtr = id;
+          break;
+        }
+      }
+    }
+    // Priority 3: Use longest candidate
+    else if (candidateIds.length > 0) {
+      extractedUtr = candidateIds.sort((a, b) => b.length - a.length)[0];
+    }
+
+    console.log("📌 Selected UTR:", extractedUtr);
+
+    // ---------------------------------------
+    // 4. Validation & Response
+    // ---------------------------------------
+    if (!extractedAmount) {
+      return res.status(400).json({
+        success: false,
+        valid: false,
+        message: "Unable to detect payment amount in screenshot",
+        reason: "Amount not found"
+      });
+    }
+
+    if (!extractedUtr) {
+      return res.status(400).json({
+        success: false,
+        valid: false,
+        message: "Unable to detect UTR in screenshot", 
+        reason: "Transaction ID not found"
+      });
+    }
+
+    // Cross-check with user input
+    const amountMatches = Math.abs(extractedAmount - parseFloat(userEnteredAmount)) <= 10;
+    const utrMatches = extractedUtr === utr_number;
+
+    if (!amountMatches || !utrMatches) {
+      return res.json({
+        success: true,
+        valid: true, // Still valid but with warnings
+        message: "Payment details found with discrepancies",
+        data: {
+          amount: extractedAmount,
+          upiTxnId: extractedUtr
+        },
+        warnings: [
+          !amountMatches && `Amount in screenshot (${extractedAmount}) differs from entered amount (${userEnteredAmount})`,
+          !utrMatches && `UTR in screenshot (${extractedUtr}) differs from entered UTR (${utr_number})`
+        ].filter(Boolean)
+      });
+    }
+
+    // ---------------------------------------
+    // 5. Success Response
+    // ---------------------------------------
+    return res.json({
+      success: true,
+      valid: true,
+      message: "Payment verified successfully",
+      data: {
+        amount: extractedAmount,
+        upiTxnId: extractedUtr
+      }
+    });
+
+  } catch (error) {
+    console.error("💥 VERIFY UPI ERROR:", error);
+    return res.status(500).json({ 
+      success: false, 
+      message: "Server error during verification" 
+    });
   }
 });
 
@@ -38,7 +206,7 @@ router.get("/wallet/:id/screenshot", async (req, res) => {
     const screenshot = result.rows[0].screenshot;
     
     // Set appropriate headers for image response
-    res.setHeader('Content-Type', 'image/jpeg'); // Adjust based on your image type
+    res.setHeader("Content-Type", "image/*"); // Adjust based on your image type
     res.setHeader('Content-Length', screenshot.length);
     res.send(screenshot);
   } catch (err) {
@@ -47,290 +215,291 @@ router.get("/wallet/:id/screenshot", async (req, res) => {
   }
 });
 
-// ✅ Updated wallet top-up with screenshot upload - FIXED VERSION
-// router.post("/wallet-topup", upload.single('screenshot'), async (req, res) => {
-//   let client;
-//   try {
-//     console.log("🟡 Wallet top-up request received");
-//     console.log("🟡 Request body:", req.body);
-//     console.log("🟡 File received:", req.file ? `Yes - ${req.file.originalname}` : 'No');
-
-//     const { user_id, amount, method, utr_number } = req.body;
-    
-//   if (method && method.toUpperCase() === "CRYPTO" && parseFloat(amount) < 6) {
-//     return res.status(400).json({
-//       success: false,
-//       message: "Minimum crypto top-up amount is $6"
-//     });
-//   }
-
-//     const screenshot = req.file ? req.file.buffer : null;
-
-//     // Validate required fields
-//     if (!user_id || !amount || !method) {
-//       console.log("❌ Missing required fields");
-//       return res.status(400).json({ 
-//         success: false, 
-//         message: "Missing required fields: user_id, amount, method" 
-//       });
-//     }
-
-//     // Get a client from the pool for transaction
-//     client = await pool.connect();
-
-//     // Start transaction
-//     await client.query('BEGIN');
-
-//     // 🧠 Get user trust and coin
-//     const userRes = await client.query(
-//       "SELECT trust, coin FROM sign_up WHERE id = $1", 
-//       [user_id]
-//     );
-    
-//     if (userRes.rows.length === 0) {
-//       await client.query('ROLLBACK');
-//       return res.status(404).json({ 
-//         success: false, 
-//         message: "User not found" 
-//       });
-//     }
-
-//     const user = userRes.rows[0];
-//     let dueValue = false;
-//     let status = 'pending';
-
-//     // 🟢 If trusted → auto-add to coin & mark due true
-//     if (user.trust === true) {
-//       await client.query(
-//         "UPDATE sign_up SET coin = coin + $1 WHERE id = $2", 
-//         [parseFloat(amount), user_id]
-//       );
-//       dueValue = true;
-//       status = 'completed';
-//     }
-
-//     // 🧾 Insert into wallet table with screenshot
-//     const validMethods = ["UPI", "SCANNER", "CRYPTO"];
-//     const paymentMethod = validMethods.includes(method.toUpperCase())
-//       ? method.toUpperCase()
-//       : "UNKNOWN";
-
-//     console.log("🟡 Inserting wallet record...");
-    
-//     const insertRes = await client.query(
-//       `INSERT INTO wallet (user_id, amount, method, utr_number, screenshot, due, status)
-//        VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-//       [
-//         user_id, 
-//         parseFloat(amount), 
-//         paymentMethod, 
-//         utr_number, 
-//         screenshot, 
-//         dueValue,
-//         status
-//       ]
-//     );
-
-//     // ✅ If due is true → add notification
-//     if (dueValue) {
-//       await client.query(
-//         "INSERT INTO notifications (user_id, message) VALUES ($1, $2)",
-//         [user_id, `Wallet top-up of $${amount} approved and added to your balance.`]
-//       );
-//     }
-
-//     // Commit transaction
-//     await client.query('COMMIT');
-
-//     console.log("✅ Wallet top-up successful");
-
-//     res.json({
-//       success: true,
-//       message: `Wallet top-up of $${amount} ${dueValue ? 'completed' : 'submitted for approval'}.`,
-//       wallet_id: insertRes.rows[0].id,
-//       due: dueValue,
-//       status: status
-//     });
-
-//   } catch (err) {
-//     // Rollback transaction in case of error
-//     if (client) {
-//       await client.query('ROLLBACK');
-//     }
-    
-//     console.error("💥 Wallet Top-up Error:", err.message);
-//     console.error("💥 Error stack:", err.stack);
-    
-//     res.status(500).json({ 
-//       success: false, 
-//       message: "Server error during wallet top-up",
-//       error: process.env.NODE_ENV === 'development' ? err.message : undefined
-//     });
-//   } finally {
-//     // Release client back to pool
-//     if (client) {
-//       client.release();
-//     } 
-//   }
-// });
-
-// ✅ Updated wallet top-up with screenshot upload - FIXED VERSION
-router.post("/wallet-topup", upload.single('screenshot'), async (req, res) => {
-  let client;
+// ✅ TEST ENDPOINT: Extract UTR and Amount from image only
+router.post("/test-image-extraction", upload.single('screenshot'), async (req, res) => {
   try {
-    console.log("🟡 Wallet top-up request received");
-    console.log("🟡 Request body:", req.body);
-    console.log("🟡 File received:", req.file ? `Yes - ${req.file.originalname}` : 'No');
-
-    const { user_id, amount, method, utr_number } = req.body;
-    
-    if (method && method.toUpperCase() === "CRYPTO" && parseFloat(amount) < 6) {
-      return res.status(400).json({
-        success: false,
-        message: "Minimum crypto top-up amount is $6"
-      });
-    }
-
-    // 🔴 ADDED: Validate UTR number for UPI and SCANNER methods
-    if (method && (method.toUpperCase() === "UPI" || method.toUpperCase() === "SCANNER")) {
-      if (!utr_number || utr_number.trim() === '') {
-        return res.status(400).json({
-          success: false,
-          message: "UTR/Transaction ID is required for UPI and QR payments"
-        });
-      }
-      
-      // 🔴 ADDED: Check if UTR number already exists to prevent duplicates
-      const existingUtr = await pool.query(
-        "SELECT id FROM wallet WHERE utr_number = $1 AND status != 'rejected'",
-        [utr_number.trim()]
-      );
-      
-      if (existingUtr.rows.length > 0) {
-        return res.status(400).json({
-          success: false,
-          message: "This UTR/Transaction ID has already been used"
-        });
-      }
-    }
+    console.log("🧪 TEST: Image extraction request received");
 
     const screenshot = req.file ? req.file.buffer : null;
+    if (!screenshot) {
+      return res.status(400).json({ success: false, message: "No image uploaded" });
+    }
 
-    // Validate required fields
-    if (!user_id || !amount || !method) {
-      console.log("❌ Missing required fields");
-      return res.status(400).json({ 
-        success: false, 
-        message: "Missing required fields: user_id, amount, method" 
+    // Step 1: Extract text from image using OCR
+    const ocrText = await extractTextFromImage(screenshot);
+    if (!ocrText || ocrText.trim().length === 0) {
+      return res.status(400).json({ success: false, message: "Could not read any text from the image" });
+    }
+
+    console.log("📝 EXTRACTED OCR TEXT:", ocrText);
+
+    // Step 2: Extract Amount (ignore timestamps, small numbers)
+    let extractedAmount = null;
+    const lines = ocrText.split('\n');
+
+    for (let line of lines) {
+      // Only consider lines containing currency symbols or keywords
+      if (/₹|INR|Amount|Paid/i.test(line)) {
+        const match = line.match(/(\d{2,6}(?:,\d{3})*(?:\.\d{2})?)/);
+        if (match) {
+          const amountNum = parseFloat(match[1].replace(/,/g, ''));
+          if (amountNum >= 10 && amountNum <= 100000) {
+            extractedAmount = amountNum;
+            break;
+          }
+        }
+      }
+    }
+
+    // Step 3: Extract UTR (prefer near 'UTR' or 'Transaction ID')
+    let extractedUtr = null;
+    const utrRegex = /\b\d{10,18}\b/g;
+    const candidateIds = ocrText.match(utrRegex) || [];
+
+    const validUtrs = candidateIds.filter(id => {
+      // Exclude 10-digit phone numbers or short numbers
+      return !(id.match(/^\d{10}$/) || id.match(/^\d{6,8}$/));
+    });
+
+    // Prefer UTR that appears near the keyword "UTR" or "Transaction ID"
+    for (let line of lines) {
+      if (/UTR|Transaction ID/i.test(line)) {
+        const match = line.match(/\d{10,18}/);
+        if (match) {
+          extractedUtr = match[0];
+          break;
+        }
+      }
+    }
+
+    // Fallback: pick the longest valid number
+    if (!extractedUtr && validUtrs.length > 0) {
+      extractedUtr = validUtrs.sort((a, b) => b.length - a.length)[0];
+    }
+
+    // Step 4: Respond with extracted data (always send success)
+    res.json({
+      success: true,
+      message: "Image processed successfully",
+      extracted_data: {
+        amount: extractedAmount || null,
+        utr: extractedUtr || null,
+        ocr_raw: ocrText,
+        candidate_utrs: candidateIds,
+        filtered_utrs: validUtrs
+      },
+      debug: {
+        amount_found: extractedAmount ? "Yes" : "No",
+        utr_candidates_found: candidateIds.length,
+        valid_utrs_found: validUtrs.length
+      }
+    });
+
+  } catch (error) {
+    console.error("💥 TEST Image Extraction Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Image processing failed",
+      error: error.message
+    });
+  }
+});
+
+router.post("/wallet-topup", upload.single("screenshot"), async (req, res) => {
+  try {
+    console.log("🔥 Received Wallet Topup Request");
+
+    const { utr_number, amount, method, user_id, img_hash, ocr_raw } = req.body;
+
+    if (!req.file) {
+      return res.json({
+        success: false,
+        message: "Screenshot image missing!",
       });
     }
 
-    // 🔴 ADDED: For UPI and SCANNER methods, screenshot is required
-    if ((method.toUpperCase() === "UPI" || method.toUpperCase() === "SCANNER") && !screenshot) {
+    const screenshotBuffer = req.file.buffer; // raw image bytes
+
+    const insertQuery = `
+      INSERT INTO wallet 
+      (user_id, amount, method, utr_number, screenshot, img_hash, ocr_raw, status)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
+      RETURNING *;
+    `;
+
+    const result = await pool.query(insertQuery, [
+      user_id,
+      amount,
+      method,
+      utr_number,
+      screenshotBuffer,
+      img_hash,
+      ocr_raw
+    ]);
+
+    return res.json({
+      success: true,
+      message: "Wallet top-up submitted successfully!",
+      data: result.rows[0],
+    });
+
+  } catch (error) {
+    console.error("❌ Wallet Topup Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal Server Error",
+    });
+  }
+});
+
+// Add these enhanced functions after your existing imports
+
+// ✅ Generate image hash function (like UTR matching)
+const generateImageHash = (imageBuffer) => {
+  return createHash('md5').update(imageBuffer).digest('hex');
+};
+
+// ✅ Enhanced wallet top-up with UTR + Image Hash verification
+router.post("/wallet-topup-enhanced", upload.single("screenshot"), async (req, res) => {
+  try {
+    console.log("🔥 Enhanced Wallet Topup Request Received");
+
+    const { utr_number, amount, method, user_id } = req.body;
+
+    // Validation
+    if (!req.file) {
       return res.status(400).json({
         success: false,
-        message: "Payment screenshot is required for UPI and QR payments"
+        message: "Payment screenshot is required!",
       });
     }
 
-    // Get a client from the pool for transaction
-    client = await pool.connect();
-
-    // Start transaction
-    await client.query('BEGIN');
-
-    // 🧠 Get user trust and coin
-    const userRes = await client.query(
-      "SELECT trust, coin FROM sign_up WHERE id = $1", 
-      [user_id]
-    );
-    
-    if (userRes.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ 
-        success: false, 
-        message: "User not found" 
+    if (!utr_number || !amount || !user_id) {
+      return res.status(400).json({
+        success: false,
+        message: "Missing required fields: UTR, Amount, or User ID",
       });
     }
 
-    const user = userRes.rows[0];
-    let dueValue = false;
-    let status = 'pending';
+    const screenshotBuffer = req.file.buffer;
 
-    // 🟢 If trusted → auto-add to coin & mark due true
-    if (user.trust === true) {
-      await client.query(
-        "UPDATE sign_up SET coin = coin + $1 WHERE id = $2", 
-        [parseFloat(amount), user_id]
-      );
-      dueValue = true;
-      status = 'completed';
-    }
+    // ✅ Step 1: Generate image hash (like UTR matching logic)
+    const img_hash = generateImageHash(screenshotBuffer);
+    console.log("🔑 Generated Image Hash:", img_hash);
 
-    // 🧾 Insert into wallet table with screenshot
-    const validMethods = ["UPI", "SCANNER", "CRYPTO"];
-    const paymentMethod = validMethods.includes(method.toUpperCase())
-      ? method.toUpperCase()
-      : "UNKNOWN";
-
-    console.log("🟡 Inserting wallet record...");
-    
-    const insertRes = await client.query(
-      `INSERT INTO wallet (user_id, amount, method, utr_number, screenshot, due, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-      [
-        user_id, 
-        parseFloat(amount), 
-        paymentMethod, 
-        utr_number, 
-        screenshot, 
-        dueValue,
-        status
-      ]
+    // ✅ Step 2: Check for duplicate UTR (existing logic)
+    const utrCheck = await pool.query(
+      "SELECT id, status FROM wallet WHERE utr_number = $1",
+      [utr_number.trim()]
     );
 
-    // ✅ If due is true → add notification
-    if (dueValue) {
-      await client.query(
-        "INSERT INTO notifications (user_id, message) VALUES ($1, $2)",
-        [user_id, `Wallet top-up of $${amount} approved and added to your balance.`]
-      );
+    if (utrCheck.rows.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: "This UTR/Transaction ID has already been used!",
+        existing_status: utrCheck.rows[0].status
+      });
     }
 
-    // Commit transaction
-    await client.query('COMMIT');
+    // ✅ Step 3: Check for duplicate image hash (NEW - like UTR matching)
+    const imageHashCheck = await pool.query(
+      "SELECT id, utr_number, status FROM wallet WHERE img_hash = $1 AND user_id = $2",
+      [img_hash, user_id]
+    );
 
-    console.log("✅ Wallet top-up successful");
+    if (imageHashCheck.rows.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: "This payment screenshot has already been submitted!",
+        duplicate_data: {
+          existing_utr: imageHashCheck.rows[0].utr_number,
+          status: imageHashCheck.rows[0].status
+        }
+      });
+    }
+
+    // ✅ Step 4: Extract OCR text for verification
+    let ocr_raw = "";
+    try {
+      ocr_raw = await extractTextFromImage(screenshotBuffer);
+      console.log("📝 Extracted OCR Text Length:", ocr_raw.length);
+    } catch (ocrError) {
+      console.warn("⚠️ OCR extraction failed, but continuing:", ocrError.message);
+      ocr_raw = "OCR extraction failed";
+    }
+
+    // ✅ Step 5: Store everything including hash (like UTR storage)
+    const result = await pool.query(
+      `INSERT INTO wallet 
+       (user_id, amount, method, utr_number, screenshot, img_hash, ocr_raw, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
+       RETURNING id, user_id, amount, method, utr_number, status, payment_date`,
+      [user_id, amount, method, utr_number, screenshotBuffer, img_hash, ocr_raw]
+    );
+
+    console.log("✅ Enhanced Wallet Topup Successful - ID:", result.rows[0].id);
+
+    return res.json({
+      success: true,
+      message: "Payment submitted successfully with duplicate protection!",
+      data: result.rows[0],
+      verification: {
+        utr_checked: true,
+        image_hash_checked: true,
+        duplicate_protection: "active"
+      }
+    });
+
+  } catch (error) {
+    console.error("❌ Enhanced Wallet Topup Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal Server Error during enhanced verification",
+      error: error.message
+    });
+  }
+});
+
+// ✅ Check image hash duplicate (like UTR check)
+router.get("/check-image-duplicate/:user_id", async (req, res) => {
+  try {
+    const { user_id } = req.params;
+    const { image_hash } = req.query;
+
+    if (!image_hash) {
+      return res.status(400).json({
+        success: false,
+        message: "Image hash is required"
+      });
+    }
+
+    const result = await pool.query(
+      "SELECT id, utr_number, status, payment_date FROM wallet WHERE img_hash = $1 AND user_id = $2",
+      [image_hash, user_id]
+    );
+
+    if (result.rows.length > 0) {
+      return res.json({
+        success: true,
+        isDuplicate: true,
+        message: "This image has already been submitted",
+        existing_record: result.rows[0]
+      });
+    }
 
     res.json({
       success: true,
-      message: `Wallet top-up of $${amount} ${dueValue ? 'completed' : 'submitted for approval'}.`,
-      wallet_id: insertRes.rows[0].id,
-      due: dueValue,
-      status: status
+      isDuplicate: false,
+      message: "Image is unique and can be submitted"
     });
 
   } catch (err) {
-    // Rollback transaction in case of error
-    if (client) {
-      await client.query('ROLLBACK');
-    }
-    
-    console.error("💥 Wallet Top-up Error:", err.message);
-    console.error("💥 Error stack:", err.stack);
-    
-    res.status(500).json({ 
-      success: false, 
-      message: "Server error during wallet top-up",
-      error: process.env.NODE_ENV === 'development' ? err.message : undefined
-    });
-  } finally {
-    // Release client back to pool
-    if (client) {
-      client.release();
-    } 
+    console.error("💥 Check Image Duplicate Error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
   }
 });
+
+
 
 // ✅ Check if UTR number already exists
 router.get("/check-utr/:utr_number", async (req, res) => {

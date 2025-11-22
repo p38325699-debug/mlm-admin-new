@@ -2,7 +2,7 @@
 const cron = require("node-cron");
 const pool = require("../config/db");
 
-
+ 
 // Run daily at midnight
 cron.schedule("0 0 * * *", async () => {
   try {

@@ -7,16 +7,15 @@ const path = require("path");
 const app = express();
 
 /* -------------------------------------------------------------------------- */
-/* 🟢 CORS Configuration (Fully Fixed for Render + Browser + SW)              */
+/* 🟢 CORS Configuration (Render + Local + Admin Frontend)                   */
 /* -------------------------------------------------------------------------- */
 const allowedOrigins = [
   "http://localhost:5173",
   "https://knowo.world",
   "https://www.knowo.world",
   "https://mlm-admin.onrender.com",
-  "https://admin-front-tx87.onrender.com" // ✅ new admin frontend
+  "https://admin-front-tx87.onrender.com"
 ];
-
 
 app.use((req, res, next) => {
   const origin = req.headers.origin;
@@ -26,10 +25,15 @@ app.use((req, res, next) => {
   }
 
   res.header("Access-Control-Allow-Credentials", "true");
-  res.header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With");
+  res.header(
+    "Access-Control-Allow-Methods",
+    "GET,POST,PUT,PATCH,DELETE,OPTIONS"
+  );
+  res.header(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, X-Requested-With"
+  );
 
-  // ✅ Handle preflight (OPTIONS) requests instantly
   if (req.method === "OPTIONS") {
     return res.sendStatus(200);
   }
@@ -38,12 +42,12 @@ app.use((req, res, next) => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* 🟠 Detect browser requests (optional helper middleware)                    */
+/* 🟠 Detect Browser Requests                                                 */
 /* -------------------------------------------------------------------------- */
 app.use((req, res, next) => {
-  const userAgent = req.headers["user-agent"] || "";
+  const ua = req.headers["user-agent"] || "";
   req.isBrowserRequest = /mozilla|chrome|safari|firefox|edge|opera/i.test(
-    userAgent.toLowerCase()
+    ua.toLowerCase()
   );
   next();
 });
@@ -61,7 +65,7 @@ app.use("/videos", express.static(path.join(__dirname, "uploads/videos")));
 /* 🔵 Request Logger                                                          */
 /* -------------------------------------------------------------------------- */
 app.use((req, res, next) => {
-  console.log(`📩 Incoming: ${req.method} ${req.url}`);
+  console.log(`📩 ${req.method} ${req.url}`);
   next();
 });
 
@@ -89,6 +93,7 @@ const cronRoutes = require("./routes/cronRoutes");
 const rewardRoutes = require("./routes/rewardRoutes");
 const goldRewardsRoutes = require("./routes/goldRewards");
 const manualCronTrigger = require("./routes/manualCronTrigger");
+const adminCronRoutes = require('./routes/adminCronRoutes');
 
 
 /* -------------------------------------------------------------------------- */
@@ -115,20 +120,20 @@ app.use("/api/cron", cronRoutes);
 app.use("/api", rewardRoutes);
 app.use("/api/gold-rewards", goldRewardsRoutes);
 app.use("/api/test", manualCronTrigger);
-
+app.use('/api/admin', adminCronRoutes);
 
 /* -------------------------------------------------------------------------- */
 /* 🕒 Cron Jobs                                                               */
 /* -------------------------------------------------------------------------- */
-require("./cronJobs/dayCountDecrement");
-require("./cronJobs/cleanup");
-require("./cronJobs/dailyQuizInit");
-require("./cronJobs/monthlyDeduction");
-require("./cronJobs/maintenanceReminder");
-require("./cronJobs/dailyCheck");
-require("./cronJobs/planDeduction");
-require("./cronJobs/unverifyIfNoMpin");
-require("./utils/cronJobs");
+// require("./cronJobs/dayCountDecrement");
+// require("./cronJobs/cleanup");
+// require("./cronJobs/dailyQuizInit");
+// require("./cronJobs/monthlyDeduction");
+// require("./cronJobs/maintenanceReminder");
+// require("./cronJobs/dailyCheck");
+// require("./cronJobs/planDeduction");
+// require("./cronJobs/unverifyIfNoMpin");
+// require("./utils/cronJobs");
 
 /* -------------------------------------------------------------------------- */
 /* 🚀 Start Server                                                            */
@@ -140,7 +145,7 @@ app.listen(PORT, () => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* 🧠 Root Health Check Endpoint                                              */
+/* 🧠 Root Health Check                                                       */
 /* -------------------------------------------------------------------------- */
 app.get("/", (req, res) => {
   res.json({ success: true, message: "Backend is running 🚀" });
